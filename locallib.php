@@ -1,4 +1,18 @@
 <?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 defined('MOODLE_INTERNAL') || die();
 
@@ -217,7 +231,7 @@ class att_page_with_filter_controls {
     }
 
     private function calc_sessgroupslist_sesstype() {
-        global $USER, $SESSION;
+        global $SESSION;
         
         if (!array_key_exists('attsessiontype', $SESSION)) {
             $SESSION->attsessiontype = array($this->cm->course => self::SESSTYPE_ALL);
@@ -263,7 +277,7 @@ class att_page_with_filter_controls {
     }
     
     private function calc_sessgroupslist() {
-        global $PAGE;
+        global $USER, $PAGE;
         
         $this->sessgroupslist = array();
         $groupmode = groups_get_activity_groupmode($this->cm);
@@ -519,7 +533,7 @@ class attforblock {
         $this->cm           = $cm;
         $this->course       = $course;
         if (is_null($context)) {
-            $this->context = get_context_instance(CONTEXT_MODULE, $this->cm->id);
+            $this->context = context_module::instance_by_id($this->cm->id);
         } else {
             $this->context = $context;
         }
@@ -789,7 +803,7 @@ class attforblock {
             }
         }
 
-        $rec = new object();
+        $rec = new stdClass();
         $rec->id = $this->pageparams->sessionid;
         $rec->lasttaken = $now;
         $rec->lasttakenby = $USER->id;
@@ -827,14 +841,15 @@ class attforblock {
         //add a flag to each user indicating whether their enrolment is active
         if (!empty($users)) {
             list($usql, $uparams) = $DB->get_in_or_equal(array_keys($users), SQL_PARAMS_NAMED, 'usid0');
-
+            
+            //CONTRIB-3549
             $sql = "SELECT ue.userid, ue.status, ue.timestart, ue.timeend
                       FROM {user_enrolments} ue
                       JOIN {enrol} e ON e.id = ue.enrolid
                      WHERE ue.userid $usql
                            AND e.status = :estatus
                            AND e.courseid = :courseid
-                  GROUP BY ue.userid";
+                  GROUP BY ue.userid, ue.status, ue.timestart, ue.timeend;";
             $params = array_merge($uparams, array('estatus'=>ENROL_INSTANCE_ENABLED, 'courseid'=>$this->course->id));
             $enrolmentsparams = $DB->get_records_sql($sql, $params);
 
@@ -859,7 +874,7 @@ class attforblock {
                  WHERE ue.userid = :uid
                        AND e.status = :estatus
                        AND e.courseid = :courseid
-              GROUP BY ue.userid";
+              GROUP BY ue.userid, ue.status, ue.timestart, ue.timeend";
         $params = array('uid' => $userid, 'estatus'=>ENROL_INSTANCE_ENABLED, 'courseid'=>$this->course->id);
         $enrolmentsparams = $DB->get_record_sql($sql, $params);
 
@@ -871,8 +886,6 @@ class attforblock {
     }
 
     public function get_statuses($onlyvisible = true) {
-        global $DB;
-
         if (!isset($this->statuses)) {
             $this->statuses = att_get_statuses($this->id, $onlyvisible);
         }
@@ -922,8 +935,6 @@ class attforblock {
     }
 
     public function get_user_stat($userid) {
-        global $DB;
-
         $ret = array();
         $ret['completed'] = $this->get_user_taken_sessions_count($userid);
         $ret['statuses'] = $this->get_user_statuses_stat($userid);
@@ -932,8 +943,6 @@ class attforblock {
     }
 
     public function get_user_taken_sessions_count($userid) {
-        global $DB;
-
         if (!array_key_exists($userid, $this->usertakensesscount))
             $this->usertakensesscount[$userid] = att_get_user_taken_sessions_count($this->id, $this->course->startdate, $userid);
 
@@ -983,7 +992,7 @@ class attforblock {
 
         foreach ($userids as $userid) {
             $grades[$userid]->userid = $userid;
-            $grades[$userid]->rawgrade = att_calc_user_grade_percent($this->get_user_grade($userid), $this->get_user_max_grade($userid));
+            $grades[$userid]->rawgrade = att_calc_user_grade_fraction($this->get_user_grade($userid), $this->get_user_max_grade($userid)) * $this->grade;
         }
 
         return grade_update('mod/attforblock', $this->course->id, 'mod', 'attforblock',
@@ -1241,26 +1250,33 @@ function att_get_user_courses_attendances($userid) {
     return $DB->get_records_sql($sql, $params);
 }
 
-function att_calc_user_grade_percent($grade, $maxgrade) {
+function att_calc_user_grade_fraction($grade, $maxgrade) {
     if ($maxgrade == 0)
         return 0;
     else
-        return $grade / $maxgrade * 100;
+        return $grade / $maxgrade;
+}
+
+function att_get_gradebook_maxgrade($attid) {
+    global $DB;
+    
+    return $DB->get_field('attforblock', 'grade', array('id' => $attid));
 }
 
 function att_update_all_users_grades($attid, $course, $context) {
-    global $COURSE;
-
     $grades = array();
 
     $userids = array_keys(get_enrolled_users($context, 'mod/attforblock:canbelisted', 0, 'u.id'));
 
     $statuses = att_get_statuses($attid);
+    $gradebook_maxgrade = att_get_gradebook_maxgrade($attid);
     foreach ($userids as $userid) {
         $grades[$userid]->userid = $userid;
         $userstatusesstat = att_get_user_statuses_stat($attid, $course->startdate, $userid);
         $usertakensesscount = att_get_user_taken_sessions_count($attid, $course->startdate, $userid);
-        $grades[$userid]->rawgrade = att_calc_user_grade_percent(att_get_user_grade($userstatusesstat, $statuses), att_get_user_max_grade($usertakensesscount, $statuses));
+        $usergrade = att_get_user_grade($userstatusesstat, $statuses);
+        $usermaxgrade = att_get_user_max_grade($usertakensesscount, $statuses);
+        $grades[$userid]->rawgrade = att_calc_user_grade_fraction($usergrade, $usermaxgrade) * $gradebook_maxgrade;
     }
 
     return grade_update('mod/attforblock', $course->id, 'mod', 'attforblock',
@@ -1283,5 +1299,3 @@ function att_log_convert_url(moodle_url $fullurl) {
 
     return substr($fullurl->out(), strlen($baseurl));
 }
-
-?>
